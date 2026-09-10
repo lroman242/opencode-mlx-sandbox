@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+# opencode-mlx-sandbox - run the opencode agent in a disposable per-folder Docker
+# container, driven by a local MLX model served on the host (spec ss 8).
+#
+# Host script: macOS / BSD userland / bash may be 3.2. Keep to portable
+# constructs (spec ss 2.1). Requires: docker, jq, curl, openssl, lsof.
+
+set -u
+
+if [ -n "${BASH_VERSINFO:-}" ] && [ "${BASH_VERSINFO[0]}" -lt 3 ]; then
+  echo "opencode-mlx-sandbox: needs bash >= 3.2 (try: brew install bash)" >&2
+  exit 1
+fi
+
+IMAGE="opencode-mlx-sandbox:latest"
+CONFIG_DIR="${OMS_CONFIG_DIR:-$HOME/.config/opencode-mlx-sandbox}"
+export OMS_CONFIG_DIR="$CONFIG_DIR"
+
+# locate lib/ - prefer a repo checkout next to this script, else the config dir
+SELF_DIR=$(cd "$(dirname "$0")" && pwd -P)
+if [ -f "$SELF_DIR/../lib/mlx-server.sh" ]; then
+  LIB_DIR=$(cd "$SELF_DIR/../lib" && pwd -P)
+else
+  LIB_DIR="$CONFIG_DIR/lib"
+fi
+MLX_SH="$LIB_DIR/mlx-server.sh"
+SEED_SH="$LIB_DIR/seed-opencode-config.sh"
+
+die() { echo "opencode-mlx-sandbox: $*" >&2; exit 1; }
+note() { echo "opencode-mlx-sandbox: $*" >&2; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
+need docker
+need jq
+
+# ---------------------------------------------------------------------------
+# .env (for defaults + build pins + git identity)
+# ---------------------------------------------------------------------------
+env_val() {
+  # env_val KEY - echo the last non-empty assignment from $CONFIG_DIR/.env
+  [ -f "$CONFIG_DIR/.env" ] || return 0
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$CONFIG_DIR/.env" \
+    | sed 's/[[:space:]]\{1,\}#.*$//;s/[[:space:]]*$//' \
+    | grep -v '^$' | tail -n1
+}
+
+MLX_MODEL_DEFAULT=$(env_val MLX_MODEL); MLX_MODEL_DEFAULT="${MLX_MODEL_DEFAULT:-mlx-community/Qwen2.5-Coder-7B-Instruct-4bit}"
+MLX_HOST_DEFAULT=$(env_val MLX_HOST);   MLX_HOST_DEFAULT="${MLX_HOST_DEFAULT:-127.0.0.1}"
+MLX_PORT_DEFAULT=$(env_val MLX_PORT);   MLX_PORT_DEFAULT="${MLX_PORT_DEFAULT:-8080}"
+MLX_KEEP_ALIVE_DEFAULT=$(env_val MLX_KEEP_ALIVE)
+OPENCODE_IMAGE_TAG=$(env_val OPENCODE_IMAGE_TAG); OPENCODE_IMAGE_TAG="${OPENCODE_IMAGE_TAG:-latest}"
+GO_VERSION=$(env_val GO_VERSION); GO_VERSION="${GO_VERSION:-1.26.5}"
+GIT_AUTHOR_NAME_ENV=$(env_val GIT_AUTHOR_NAME)
+GIT_AUTHOR_EMAIL_ENV=$(env_val GIT_AUTHOR_EMAIL)
+
+is_loopback() {
+  case "$1" in 127.*|::1|localhost|"") return 0 ;; *) return 1 ;; esac
+}
+
+path_hash() {
+  printf %s "$1" | shasum -a 1 | cut -c1-12
+}
+
+# ---------------------------------------------------------------------------
+# image
+# ---------------------------------------------------------------------------
+image_exists() { docker image inspect "$IMAGE" >/dev/null 2>&1; }
+
+build_image() {
+  [ -x "$SEED_SH" ] || die "seed script not found ($SEED_SH) - run install.sh"
+  [ -f "$CONFIG_DIR/Dockerfile" ] || die "build assets missing in $CONFIG_DIR - run install.sh"
+  note "staging host opencode config"
+  "$SEED_SH" || die "config seeding failed"
+  note "building $IMAGE"
+  docker build -t "$IMAGE" \
+    --build-arg UID="$(id -u)" \
+    --build-arg GID="$(id -g)" \
+    --build-arg OPENCODE_IMAGE_TAG="$OPENCODE_IMAGE_TAG" \
+    --build-arg GO_VERSION="$GO_VERSION" \
+    "$CONFIG_DIR" || die "docker build failed"
+}
+
+ensure_image() {
+  if [ "${DO_REBUILD:-0}" = "1" ] || ! image_exists; then
+    build_image
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# session volume (spec ss 7)
+# ---------------------------------------------------------------------------
+volume_name_for() { echo "oms-$(path_hash "$1")"; }
+
+ensure_volume() {
+  local target="$1" vol; vol=$(volume_name_for "$target")
+  if [ "${DO_FRESH:-0}" = "1" ]; then
+    docker volume rm "$vol" >/dev/null 2>&1 || true
+  fi
+  if ! docker volume inspect "$vol" >/dev/null 2>&1; then
+    docker volume create --label "oms.path=$target" "$vol" >/dev/null
+  fi
+  echo "$vol"
+}
+
+list_session_volumes() {
+  docker volume ls -q --filter 'label=oms.path'
+}
+
+# ---------------------------------------------------------------------------
+# usage
+# ---------------------------------------------------------------------------
+usage() {
+  cat <<'EOF'
+opencode-mlx-sandbox [PATH] [OPTIONS] [-- <opencode args>]
+opencode-mlx-sandbox <SUBCOMMAND> [PATH] [OPTIONS]
+
+Subcommands:
+  (none)        ensure image + host MLX server, start interactive opencode
+  run           non-interactive: opencode run "<prompt>"  (prompt after --)
+  rebuild       re-stage host config + rebuild the image, then exit
+  build         build the image if missing, then exit
+  shell         start bash in the container instead of opencode
+  mlx start     start / ensure the host MLX server for --model
+  mlx stop      stop the host MLX server (only if this tool started it)
+  mlx status    model, served id, host, port, pid, health
+  mlx logs      tail the host MLX server log
+  models        list MLX models found in the HuggingFace cache
+  stop          remove the container for PATH
+  versions      print opencode + tool versions from the image
+  ps            list oms- containers
+  rm            force-remove all oms- containers
+  volume ls     list per-project session volumes
+  volume rm     remove every per-project session volume
+  rmi           remove the opencode-mlx-sandbox:latest image
+
+Options:
+  --model ID|PATH        HuggingFace repo id or local MLX model dir
+  --host HOST            MLX server host (non-loopback => connect-only)
+  --port N               MLX server port
+  --mlx-opts "..."       raw flags passed to mlx_lm.server verbatim
+  --model-opts k=v,...   mlx_lm.server long-option names -> --k v
+  --mlx-keep-alive DUR   stop a managed server after this idle time (e.g. 30m)
+  --mlx-no-auth          do not generate / require a bearer token
+  --yolo                 run opencode with tool approval disabled
+  --rebuild              re-stage + rebuild, then continue
+  --env PATH             extra env file (KEY=VALUE lines)
+  --fresh                wipe the persisted session volume for this run
+  --no-persist           do not create / use a session volume
+  --name NAME            container name
+  -h, --help
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# parse: optional SUBCOMMAND, then PATH + options, then -- passthru
+# ---------------------------------------------------------------------------
+SUBCMD=""
+SUB2=""
+case "${1:-}" in
+  run|rebuild|build|shell|models|stop|versions|ps|rm|rmi)
+    SUBCMD="$1"; shift ;;
+  mlx)
+    SUBCMD="mlx"; shift
+    SUB2="${1:-}"; [ -n "$SUB2" ] && shift
+    case "$SUB2" in start|stop|status|logs) : ;; *) die "mlx: expected start|stop|status|logs" ;; esac ;;
+  volume)
+    SUBCMD="volume"; shift
+    SUB2="${1:-}"; [ -n "$SUB2" ] && shift
+    case "$SUB2" in ls|rm) : ;; *) die "volume: expected ls|rm" ;; esac ;;
+  -h|--help) usage; exit 0 ;;
+esac
+
+POS_PATH=""
+MODEL=""; HOST=""; PORT=""; MLX_OPTS=""; MODEL_OPTS=""
+KEEP_ALIVE=""; NO_AUTH=0; DO_YOLO=0; DO_REBUILD=0
+ENV_FILE=""; DO_FRESH=0; NO_PERSIST=0; NAME=""
+PASSTHRU_SET=0
+PASS=""
+
+# collect passthru (everything after --) into an array-ish via $@ later
+PASS_ARGS=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; PASSTHRU_SET=1; while [ $# -gt 0 ]; do PASS_ARGS[${#PASS_ARGS[@]}]="$1"; shift; done; break ;;
+    --model) MODEL="$2"; shift 2 ;;
+    --host) HOST="$2"; shift 2 ;;
+    --port) PORT="$2"; shift 2 ;;
+    --mlx-opts) MLX_OPTS="$2"; shift 2 ;;
+    --model-opts) MODEL_OPTS="$2"; shift 2 ;;
+    --mlx-keep-alive) KEEP_ALIVE="$2"; shift 2 ;;
+    --mlx-no-auth) NO_AUTH=1; shift ;;
+    --yolo) DO_YOLO=1; shift ;;
+    --rebuild) DO_REBUILD=1; shift ;;
+    --env) ENV_FILE="$2"; shift 2 ;;
+    --fresh) DO_FRESH=1; shift ;;
+    --no-persist) NO_PERSIST=1; shift ;;
+    --name) NAME="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option: $1" ;;
+    *)
+      [ -z "$POS_PATH" ] || die "unexpected argument: $1"
+      POS_PATH="$1"; shift ;;
+  esac
+done
+
+MODEL="${MODEL:-$MLX_MODEL_DEFAULT}"
+HOST="${HOST:-$MLX_HOST_DEFAULT}"
+PORT="${PORT:-$MLX_PORT_DEFAULT}"
+KEEP_ALIVE="${KEEP_ALIVE:-$MLX_KEEP_ALIVE_DEFAULT}"
+
+resolve_target() {
+  local p="${1:-.}"
+  case "$p" in '~/'*) p="$HOME/${p#\~/}" ;; esac
+  [ -d "$p" ] || die "not a directory: $p"
+  ( cd "$p" && pwd -P )
+}
+
+# mlx-server.sh arg vector shared by launch + `mlx *`
+mlx_args() {
+  set -- --model "$MODEL" --host "$HOST" --port "$PORT"
+  [ -n "$MLX_OPTS" ]   && set -- "$@" --mlx-opts "$MLX_OPTS"
+  [ -n "$MODEL_OPTS" ] && set -- "$@" --model-opts "$MODEL_OPTS"
+  [ -n "$KEEP_ALIVE" ] && set -- "$@" --mlx-keep-alive "$KEEP_ALIVE"
+  [ "$NO_AUTH" -eq 1 ] && set -- "$@" --mlx-no-auth
+  printf '%s\n' "$@"
+}
+
+run_mlx() {
+  [ -x "$MLX_SH" ] || die "mlx-server.sh not found ($MLX_SH) - run install.sh"
+  local cmd="$1"; shift
+  local args=()
+  while IFS= read -r a; do args[${#args[@]}]="$a"; done < <(mlx_args)
+  "$MLX_SH" "$cmd" "${args[@]}" "$@"
+}
+
+model_id_of() {
+  local s="${1%/}"; echo "${s##*/}"
+}
+
+# ---------------------------------------------------------------------------
+# subcommand dispatch (non-launch)
+# ---------------------------------------------------------------------------
+case "$SUBCMD" in
+  mlx)
+    case "$SUB2" in
+      start)  run_mlx ensure ;;
+      stop)   "$MLX_SH" stop ;;
+      status) "$MLX_SH" status ;;
+      logs)   "$MLX_SH" logs ;;
+    esac
+    exit $? ;;
+
+  build)
+    image_exists && { note "$IMAGE already present"; exit 0; }
+    build_image; exit 0 ;;
+
+  rebuild)
+    build_image; exit 0 ;;
+
+  versions)
+    ensure_image
+    exec docker run --rm "$IMAGE" sandbox-versions ;;
+
+  models)
+    hub="$HOME/.cache/huggingface/hub"
+    [ -d "$hub" ] || { note "no HF cache at $hub"; exit 0; }
+    for d in "$hub"/models--*; do
+      [ -d "$d" ] || continue
+      b=$(basename "$d"); b=${b#models--}
+      printf '%s\n' "$(printf '%s' "$b" | sed 's/--/\//g')"
+    done
+    exit 0 ;;
+
+  ps)
+    exec docker ps -a --filter 'name=^oms-' ;;
+
+  rm)
+    ids=$(docker ps -aq --filter 'name=^oms-')
+    [ -n "$ids" ] && docker rm -f $ids || note "no oms- containers"
+    exit 0 ;;
+
+  rmi)
+    docker rmi "$IMAGE" || true; exit 0 ;;
+
+  stop)
+    TARGET=$(resolve_target "$POS_PATH")
+    cname="${NAME:-oms-$(basename "$TARGET")-$(path_hash "$TARGET")}"
+    docker rm -f "$cname" 2>/dev/null && note "removed $cname" || note "no container $cname"
+    exit 0 ;;
+
+  volume)
+    case "$SUB2" in
+      ls)
+        printf '%-20s %s\n' "VOLUME" "PATH"
+        for v in $(list_session_volumes); do
+          p=$(docker volume inspect "$v" --format '{{ index .Labels "oms.path" }}' 2>/dev/null)
+          printf '%-20s %s\n' "$v" "$p"
+        done
+        exit 0 ;;
+      rm)
+        vols=$(list_session_volumes)
+        [ -n "$vols" ] && docker volume rm $vols || note "no session volumes"
+        exit 0 ;;
+    esac ;;
+esac
+
+# ---------------------------------------------------------------------------
+# launch sequence (no subcommand, or `run` / `shell`)  -- spec ss 8
+# ---------------------------------------------------------------------------
+TARGET=$(resolve_target "$POS_PATH")
+
+# 2. host MLX server
+run_mlx ensure || die "MLX server not available"
+
+if is_loopback "$HOST"; then MLX_FORWARD=1; else MLX_FORWARD=0; fi
+MLX_MODEL_ID=$(model_id_of "$MODEL")
+
+# bearer token from mlx.json (managed server only)
+MLX_API_KEY=""
+JSON_FILE="$CONFIG_DIR/run/mlx.json"
+if [ -f "$JSON_FILE" ]; then
+  t=$(jq -r '.token // empty' "$JSON_FILE" 2>/dev/null)
+  [ -n "$t" ] && MLX_API_KEY="$t"
+fi
+
+# 3. image
+ensure_image
+
+# 4. session volume
+VOL=""
+if [ "$NO_PERSIST" -eq 0 ]; then
+  VOL=$(ensure_volume "$TARGET")
+fi
+
+# 5. record last_used for keep-alive accounting
+"$MLX_SH" mark-used 2>/dev/null || true
+
+# 6. assemble docker run
+DR=(docker run --rm -i)
+[ -t 0 ] && [ -t 1 ] && DR+=(-t)
+
+CNAME="${NAME:-oms-$(basename "$TARGET")-$(path_hash "$TARGET")}"
+DR+=(--name "$CNAME")
+DR+=(-v "$TARGET:/workspace" -w /workspace)
+[ -n "$VOL" ] && DR+=(-v "$VOL:/home/dev/.local/share/opencode")
+DR+=(--add-host "host.docker.internal:host-gateway")
+
+DR+=(-e "MLX_FORWARD=$MLX_FORWARD")
+DR+=(-e "MLX_HOST=$HOST")
+DR+=(-e "MLX_PORT=$PORT")
+DR+=(-e "MLX_MODEL_ID=$MLX_MODEL_ID")
+DR+=(-e "OMS_YOLO=$DO_YOLO")
+[ -n "$MLX_API_KEY" ] && DR+=(-e "MLX_API_KEY=$MLX_API_KEY")
+[ -n "$GIT_AUTHOR_NAME_ENV" ]  && DR+=(-e "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME_ENV")
+[ -n "$GIT_AUTHOR_EMAIL_ENV" ] && DR+=(-e "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL_ENV")
+if [ -n "$ENV_FILE" ]; then
+  [ -f "$ENV_FILE" ] || die "env file not found: $ENV_FILE"
+  DR+=(--env-file "$ENV_FILE")
+fi
+
+DR+=("$IMAGE")
+
+# 7. command
+if [ "$SUBCMD" = "shell" ]; then
+  if [ "${#PASS_ARGS[@]}" -gt 0 ]; then
+    DR+=(bash "${PASS_ARGS[@]}")
+  else
+    DR+=(bash)
+  fi
+elif [ "$SUBCMD" = "run" ]; then
+  [ "${#PASS_ARGS[@]}" -gt 0 ] || die "run: provide the prompt after --  (e.g. run -- \"fix the build\")"
+  DR+=(sandbox-run run "${PASS_ARGS[@]}")
+else
+  DR+=(sandbox-run "${PASS_ARGS[@]}")
+fi
+
+exec "${DR[@]}"

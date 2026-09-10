@@ -1,0 +1,12 @@
+# docker build context = ~/.config/opencode-mlx-sandbox
+run/
+*.log
+.env
+.git
+.DS_Store
+
+# already pruned by seed-opencode-config.sh, but belt-and-braces
+.opencode-config/**/node_modules
+.opencode-config/**/.git
+.opencode-config/**/__pycache__
+.opencode-config/**/*.map

@@ -1,0 +1,4 @@
+.opencode-config/
+run/
+*.log
+.DS_Store

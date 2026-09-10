@@ -4,7 +4,7 @@
 # Subcommands: ensure | start | stop | status | logs
 #
 # Runs on the macOS host: BSD userland, /bin/bash may be 3.2. Keep to 3.2
-# constructs and POSIX tools (see spec ss 2.1). jq and curl are required;
+# constructs and POSIX tools. jq and curl are required;
 # openssl (for tokens) and lsof (port check) ship with macOS.
 
 set -u
@@ -97,7 +97,7 @@ dur_to_secs() {
   esac
 }
 
-# Resolve --model to what mlx_lm.server should load (spec 3.1).
+# Resolve --model to what mlx_lm.server should load.
 resolve_model() {
   local spec="$1"
   case "$spec" in
@@ -107,7 +107,7 @@ resolve_model() {
   esac
 }
 
-# Pinned served id: basename with any org/ prefix or path stripped (spec 3.2).
+# Pinned served id: basename with any org/ prefix or path stripped.
 model_id_of() {
   local spec="$1"
   spec=${spec%/}
@@ -258,7 +258,7 @@ resolve_request() {
 }
 
 # ---------------------------------------------------------------------------
-# idle sweep (spec 3.5)
+# idle sweep
 # ---------------------------------------------------------------------------
 idle_sweep() {
   [ -f "$JSON_FILE" ] || return 0
@@ -277,7 +277,7 @@ idle_sweep() {
 }
 
 # ---------------------------------------------------------------------------
-# start (spec 3.2 / 3.3)
+# start
 # ---------------------------------------------------------------------------
 health_wait() {
   local host="$1" port="$2" token="$3" want_id="$4"
@@ -360,7 +360,7 @@ do_start() {
 }
 
 # ---------------------------------------------------------------------------
-# match check (spec 3.4)
+# match check
 # ---------------------------------------------------------------------------
 check_match_or_die() {
   resolve_request
@@ -403,7 +403,7 @@ check_match_or_die() {
 }
 
 # ---------------------------------------------------------------------------
-# ensure (spec 3.4) - the entry point the launcher calls
+# ensure - the entry point the launcher calls
 # ---------------------------------------------------------------------------
 do_ensure() {
   resolve_request
@@ -429,7 +429,7 @@ do_ensure() {
 }
 
 # ---------------------------------------------------------------------------
-# stop (spec 3.5)
+# stop
 # ---------------------------------------------------------------------------
 do_stop() {
   if [ "$(json_get '.managed')" != "true" ]; then
@@ -456,7 +456,7 @@ do_stop() {
 }
 
 # ---------------------------------------------------------------------------
-# status (spec 3.6)
+# status
 # ---------------------------------------------------------------------------
 do_status() {
   idle_sweep

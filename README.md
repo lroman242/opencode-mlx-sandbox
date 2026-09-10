@@ -1,12 +1,16 @@
 # opencode-mlx-sandbox
 
+[![platform: macOS · Apple Silicon](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Apple%20Silicon-black?logo=apple)](https://support.apple.com/en-us/116943)
+[![runtime: Docker Desktop](https://img.shields.io/badge/runtime-Docker%20Desktop-2496ED?logo=docker&logoColor=white)](https://www.docker.com/products/docker-desktop/)
+[![model: MLX (local)](https://img.shields.io/badge/model-MLX%20local-orange)](https://github.com/ml-explore/mlx-lm)
+[![agent: opencode](https://img.shields.io/badge/agent-opencode-000)](https://opencode.ai)
+[![shell: bash 3.2+](https://img.shields.io/badge/shell-bash%203.2%2B-4EAA25?logo=gnubash&logoColor=white)](#)
+
 Run the [opencode](https://opencode.ai) coding agent inside a disposable,
 per-folder Docker container, driven by a local **MLX** model served on your Mac.
 Fully local: the model runs on the host under Apple's MLX runtime, the agent runs
 sandboxed in a container that can only see the one project folder you point it at
 and can never write back to your global opencode config.
-
-See [`spec.md`](spec.md) for the full design.
 
 ## Requirements
 
@@ -68,6 +72,37 @@ opencode-mlx-sandbox mlx stop
 
 Run `opencode-mlx-sandbox --help` for the full command + option list.
 
+### Subcommands
+
+```
+opencode-mlx-sandbox [PATH] [OPTIONS] [-- <opencode args>]
+opencode-mlx-sandbox <SUBCOMMAND> [PATH] [OPTIONS]
+```
+
+`PATH` is positional, defaults to `.`, and is mounted at `/workspace`.
+
+| Subcommand | What it does |
+|---|---|
+| _(none)_ | Ensure the image + host MLX server, then start an interactive `opencode` session for `PATH`. |
+| `run` | Non-interactive: `opencode run "<prompt>"`. The prompt goes after `--`, e.g. `run -- "add tests"`. |
+| `rebuild` | Re-stage `~/.config/opencode` and rebuild the image, then exit. |
+| `build` | Build the image if it is missing, then exit (no-op if present). |
+| `shell` | Start `bash` in the container instead of `opencode` (args after `--` are passed to `bash`). |
+| `mlx start` | Start / ensure the host MLX server for `--model`, then exit. |
+| `mlx stop` | Stop the host MLX server — only if this tool started it (`managed`). |
+| `mlx status` | Print model, served id (`mlx/<id>`), host, port, PID, uptime, keep-alive, `managed` flag, and the live `/v1/models` probe. |
+| `mlx logs` | Tail `~/.config/opencode-mlx-sandbox/run/mlx.log`. |
+| `models` | List MLX models found in the local HuggingFace cache. |
+| `stop` | Remove the container for `PATH` (session volume is kept). |
+| `versions` | Print `opencode` + toolchain versions from the image. |
+| `ps` | List `oms-` containers. |
+| `rm` | Force-remove all `oms-` containers. |
+| `volume ls` | List every per-project session volume, by path label. |
+| `volume rm` | Remove every per-project session volume. |
+| `rmi` | Remove the `opencode-mlx-sandbox:latest` image. |
+
+Everything after `--` is passed straight to `opencode` (or to `bash` with `shell`).
+
 ### Prewarm (optional)
 
 To skip the model cold-load on the first session of the day, run
@@ -93,3 +128,7 @@ Larger models want a larger `max-kv-size` / context; tune per model size.
   `--no-persist` skips it.
 - Remote / non-Apple MLX endpoint: `--host <addr> --port <n>` (connect-only,
   never starts a server; your config must name that same host).
+
+## License
+
+[MIT](LICENSE)

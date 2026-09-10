@@ -2,7 +2,7 @@
 # lib/seed-opencode-config.sh
 #
 # Stage the host's ~/.config/opencode -> $CONFIG_DIR/.opencode-config/ so it can
-# be baked into the image (spec ss 5). Run by install.sh and by
+# be baked into the image. Run by install.sh and by
 # `opencode-mlx-sandbox rebuild`.
 #
 # Runs on the macOS host. macOS may ship openrsync (limited flags), so stick to

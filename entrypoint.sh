@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# entrypoint.sh - container start (spec ss 6)
+# entrypoint.sh - container start
 #
 #   1. sync seed config -> ~/.config/opencode
-#   2. apply the sandbox-owned config rewrites (ss 6.1)
+#   2. apply the sandbox-owned config rewrites
 #   3. git identity + safe.directory
 #   4. start the socat forwarder when MLX_FORWARD=1
 #   5. mark /workspace trusted for opencode
@@ -48,8 +48,8 @@ if [ -d "$SEED" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. config rewrites (ss 6.1) - deep-merge a patch over the copied opencode.json.
-#    provider / model / small_model are deliberately left untouched (ss 5.1).
+# 2. config rewrites - deep-merge a patch over the copied opencode.json.
+#    provider / model / small_model are deliberately left untouched.
 # ---------------------------------------------------------------------------
 CONF_JSON="$CFG/opencode.json"
 [ -f "$CONF_JSON" ] || CONF_JSON="$CFG/opencode.jsonc"

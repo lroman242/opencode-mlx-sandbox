@@ -1,4 +1,4 @@
-# opencode-mlx-sandbox container image (spec ss 4)
+# opencode-mlx-sandbox container image
 #
 # Base already ships the `opencode` CLI. We only layer a dev toolchain and the
 # sandbox glue on top. Build + run happen on Apple Silicon, so everything must

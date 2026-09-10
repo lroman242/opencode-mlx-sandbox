@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh - installer / upgrader (spec ss 9). Re-runnable.
+# install.sh - installer / upgrader. Re-runnable.
 
 set -eu
 

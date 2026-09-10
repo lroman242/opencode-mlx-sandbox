@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # opencode-mlx-sandbox - run the opencode agent in a disposable per-folder Docker
-# container, driven by a local MLX model served on the host (spec ss 8).
+# container, driven by a local MLX model served on the host.
 #
 # Host script: macOS / BSD userland / bash may be 3.2. Keep to portable
-# constructs (spec ss 2.1). Requires: docker, jq, curl, openssl, lsof.
+# constructs. Requires: docker, jq, curl, openssl, lsof.
 
 set -u
 
@@ -86,7 +86,7 @@ ensure_image() {
 }
 
 # ---------------------------------------------------------------------------
-# session volume (spec ss 7)
+# session volume
 # ---------------------------------------------------------------------------
 volume_name_for() { echo "oms-$(path_hash "$1")"; }
 
@@ -305,7 +305,7 @@ case "$SUBCMD" in
 esac
 
 # ---------------------------------------------------------------------------
-# launch sequence (no subcommand, or `run` / `shell`)  -- spec ss 8
+# launch sequence (no subcommand, or `run` / `shell`)
 # ---------------------------------------------------------------------------
 TARGET=$(resolve_target "$POS_PATH")
 

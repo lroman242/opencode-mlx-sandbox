@@ -13,15 +13,18 @@ ARG UID=1000
 ARG GID=1000
 
 USER root
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# --- dev toolchain -------------------------------------------------------------
-# Base is Debian/Ubuntu-derived (apt). If a future base is Alpine, switch to apk
-# + a static Go tarball here.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git make less jq rsync ripgrep socat \
-      build-essential \
- && rm -rf /var/lib/apt/lists/*
+# Base is Alpine (musl, apk, busybox `sh` - no apt, no bash). Confirmed at
+# implementation time (ghcr.io/anomalyco/opencode:latest -> Alpine 3.24, no
+# /bin/bash). If a future base switches to Debian/Ubuntu, swap this block for
+# apt + build-essential. `rg` (ripgrep) already ships in the base image.
+# `shadow` gives GNU-style useradd/groupadd/usermod/groupmod; `build-base` +
+# `musl-dev` cover cgo for `go build`.
+RUN apk add --no-cache \
+      bash ca-certificates curl git make less jq rsync socat \
+      shadow build-base musl-dev
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Go
 RUN arch="${TARGETARCH:-arm64}" \
@@ -61,8 +64,15 @@ ENV OPENCODE_DISABLE_AUTOUPDATE=1 \
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN printf '%s\n' '#!/usr/bin/env bash' 'set -e' \
       'echo "opencode: $(opencode --version 2>/dev/null || echo unknown)"' \
+      'ver() {' \
+      '  case "$1" in' \
+      '    go)    go version 2>/dev/null ;;' \
+      '    socat) socat -V 2>/dev/null | head -n1 ;;' \
+      '    *)     "$1" --version 2>/dev/null | head -n1 ;;' \
+      '  esac' \
+      '}' \
       'for t in go uv task rg jq git socat rsync make; do' \
-      '  printf "%-8s %s\n" "$t" "$($t --version 2>/dev/null | head -n1 || echo missing)"' \
+      '  printf "%-8s %s\n" "$t" "$(ver "$t" || echo missing)"' \
       'done' > /usr/local/bin/sandbox-versions \
  && chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/sandbox-versions
 

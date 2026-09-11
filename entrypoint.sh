@@ -21,7 +21,8 @@ DATA="$HOME/.local/share/opencode"
 MLX_FORWARD="${MLX_FORWARD:-0}"
 MLX_HOST="${MLX_HOST:-127.0.0.1}"
 MLX_PORT="${MLX_PORT:-8080}"
-MLX_MODEL_ID="${MLX_MODEL_ID:-}"
+MLX_MODEL_ID="${MLX_MODEL_ID:-default_model}"
+MLX_MODEL="${MLX_MODEL:-}"
 OMS_YOLO="${OMS_YOLO:-0}"
 
 log() { echo "[entrypoint] $*" >&2; }
@@ -108,14 +109,16 @@ if [ "$MLX_FORWARD" = "1" ]; then
 else
   PROBE_HOST="$MLX_HOST"
 fi
+# /v1/models lists every mlx-lm-compatible repo in the whole HF cache (not
+# just the loaded one), so there is no single "current model" field to read -
+# check whether our resolved --model value is present in the list instead.
 probe_out=$(curl -fsS --max-time 5 "http://${PROBE_HOST}:${MLX_PORT}/v1/models" 2>/dev/null)
-probe_id=$(printf '%s' "$probe_out" | jq -r '.data[0].id // empty' 2>/dev/null)
-if [ -z "$probe_id" ]; then
+if [ -z "$probe_out" ]; then
   log "WARN: MLX server not reachable at ${PROBE_HOST}:${MLX_PORT} - run: opencode-mlx-sandbox mlx status"
-elif [ -n "$MLX_MODEL_ID" ] && [ "$probe_id" != "$MLX_MODEL_ID" ]; then
-  log "WARN: MLX server serves '$probe_id', expected '$MLX_MODEL_ID' - run: opencode-mlx-sandbox mlx status"
+elif [ -n "$MLX_MODEL" ] && ! printf '%s' "$probe_out" | jq -e --arg m "$MLX_MODEL" '.data | any(.id == $m)' >/dev/null 2>&1; then
+  log "WARN: MLX server does not report '$MLX_MODEL' in /v1/models - run: opencode-mlx-sandbox mlx status"
 else
-  log "MLX server OK: $probe_id"
+  log "MLX server OK (opencode model: mlx/${MLX_MODEL_ID})"
 fi
 
 # ---------------------------------------------------------------------------

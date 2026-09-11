@@ -121,7 +121,7 @@ Subcommands:
   shell         start bash in the container instead of opencode
   mlx start     start / ensure the host MLX server for --model
   mlx stop      stop the host MLX server (only if this tool started it)
-  mlx status    model, served id, host, port, pid, health
+  mlx status    model, opencode id (mlx/default_model), host, port, pid, health
   mlx logs      tail the host MLX server log
   models        list MLX models found in the HuggingFace cache
   stop          remove the container for PATH
@@ -233,10 +233,6 @@ run_mlx() {
   "$MLX_SH" "$cmd" "${args[@]}" "$@"
 }
 
-model_id_of() {
-  local s="${1%/}"; echo "${s##*/}"
-}
-
 # ---------------------------------------------------------------------------
 # subcommand dispatch (non-launch)
 # ---------------------------------------------------------------------------
@@ -313,14 +309,25 @@ TARGET=$(resolve_target "$POS_PATH")
 run_mlx ensure || die "MLX server not available"
 
 if is_loopback "$HOST"; then MLX_FORWARD=1; else MLX_FORWARD=0; fi
-MLX_MODEL_ID=$(model_id_of "$MODEL")
 
-# bearer token from mlx.json (managed server only)
+# mlx_lm.server always aliases the fixed string "default_model" -> whatever
+# --model it was started with (verified against the mlx-lm source; there is
+# no --model-name flag and /v1/models reports no single "current model").
+# So the opencode-facing id is always mlx/default_model, never derived.
+MLX_MODEL_ID="default_model"
+
+# resolved --model value + bearer token, read back from mlx.json (`ensure`
+# above always writes/refreshes it). MLX_MODEL is what the container's probe
+# checks for in /v1/models (see entrypoint.sh); mlx-lm has no server-side
+# auth today, so MLX_API_KEY is forwarded for forward-compatibility only.
 MLX_API_KEY=""
+RESOLVED_MODEL="$MODEL"
 JSON_FILE="$CONFIG_DIR/run/mlx.json"
 if [ -f "$JSON_FILE" ]; then
   t=$(jq -r '.token // empty' "$JSON_FILE" 2>/dev/null)
   [ -n "$t" ] && MLX_API_KEY="$t"
+  m=$(jq -r '.model // empty' "$JSON_FILE" 2>/dev/null)
+  [ -n "$m" ] && RESOLVED_MODEL="$m"
 fi
 
 # 3. image
@@ -349,6 +356,7 @@ DR+=(-e "MLX_FORWARD=$MLX_FORWARD")
 DR+=(-e "MLX_HOST=$HOST")
 DR+=(-e "MLX_PORT=$PORT")
 DR+=(-e "MLX_MODEL_ID=$MLX_MODEL_ID")
+DR+=(-e "MLX_MODEL=$RESOLVED_MODEL")
 DR+=(-e "OMS_YOLO=$DO_YOLO")
 [ -n "$MLX_API_KEY" ] && DR+=(-e "MLX_API_KEY=$MLX_API_KEY")
 [ -n "$GIT_AUTHOR_NAME_ENV" ]  && DR+=(-e "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME_ENV")

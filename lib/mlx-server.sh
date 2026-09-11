@@ -107,12 +107,14 @@ resolve_model() {
   esac
 }
 
-# Pinned served id: basename with any org/ prefix or path stripped.
-model_id_of() {
-  local spec="$1"
-  spec=${spec%/}
-  echo "${spec##*/}"
-}
+# mlx_lm.server has no --model-name flag and /v1/models does not report "the
+# currently loaded model" (it lists every mlx-lm-compatible repo found in the
+# whole HF cache, plus the resolved --model path if local - never a clean
+# basename). What IS reliable: ModelProvider always aliases the literal string
+# "default_model" -> whatever --model was set to (checked against the actual
+# mlx-lm source). So the id opencode's config should use is always the fixed
+# string "default_model" - no pinning/derivation needed.
+MLX_MODEL_ID_FIXED="default_model"
 
 # Build the extra-arg list from --mlx-opts (raw) and --model-opts (k=v,...).
 # Emits one token per line; caller collects into an array.
@@ -150,8 +152,11 @@ build_opts() {
 }
 
 json_get() {
+  # `// empty` treats jq-falsy values (false, 0, "") as missing, not just
+  # null - that would turn managed:false or started_at:0 into "". Compare
+  # against null explicitly instead.
   [ -f "$JSON_FILE" ] || { echo ""; return 0; }
-  jq -r "$1 // empty" "$JSON_FILE" 2>/dev/null
+  jq -r "($1) as \$v | if \$v == null then \"\" else \$v end" "$JSON_FILE" 2>/dev/null
 }
 
 pid_alive() {
@@ -167,17 +172,29 @@ managed_pid() {
   echo "$pid"
 }
 
-# curl /v1/models and echo the first reported model id (empty on failure).
-probe_id() {
+# curl /v1/models. It lists every mlx-lm-compatible repo in the whole HF
+# cache (not just the loaded one) plus the resolved --model path if local -
+# never a single distinguished "current model". Echoes the raw `.data[].id`
+# list, one per line (empty on failure).
+probe_list() {
   local host="$1" port="$2" token="$3"
   local url="http://$host:$port/v1/models"
   if [ -n "$token" ]; then
     curl -fsS --max-time 5 -H "Authorization: Bearer $token" "$url" 2>/dev/null \
-      | jq -r '.data[0].id // empty' 2>/dev/null
+      | jq -r '.data[].id // empty' 2>/dev/null
   else
     curl -fsS --max-time 5 "$url" 2>/dev/null \
-      | jq -r '.data[0].id // empty' 2>/dev/null
+      | jq -r '.data[].id // empty' 2>/dev/null
   fi
+}
+
+# Is $4 present among the reported ids? echoes "yes"/"" (empty on unreachable
+# or absent).
+probe_has_model() {
+  local host="$1" port="$2" token="$3" want="$4"
+  local list; list=$(probe_list "$host" "$port" "$token")
+  [ -z "$list" ] && return 1
+  printf '%s\n' "$list" | grep -Fxq "$want" && echo yes
 }
 
 server_answering() {
@@ -248,7 +265,7 @@ R_HOST=""; R_PORT=""; R_KEEP_ALIVE=""
 resolve_request() {
   R_MODEL_SPEC="${A_MODEL:-$MLX_MODEL}"
   R_MODEL=$(resolve_model "$R_MODEL_SPEC")
-  R_MODEL_ID=$(model_id_of "$R_MODEL_SPEC")
+  R_MODEL_ID="$MLX_MODEL_ID_FIXED"
   R_HOST="${A_HOST:-$MLX_HOST}"
   R_PORT="${A_PORT:-$MLX_PORT}"
   R_KEEP_ALIVE="${A_KEEP_ALIVE:-$MLX_KEEP_ALIVE}"
@@ -279,24 +296,25 @@ idle_sweep() {
 # ---------------------------------------------------------------------------
 # start
 # ---------------------------------------------------------------------------
+# Wait for /v1/models to be reachable AND list our resolved --model value
+# (see probe_has_model - there is no single "current model" field to assert
+# against, so presence-in-cache-scan is the correctness check).
 health_wait() {
-  local host="$1" port="$2" token="$3" want_id="$4"
+  local host="$1" port="$2" token="$3" want_model="$4"
   local deadline=$(( $(now_epoch) + MLX_START_TIMEOUT ))
-  local id=""
   while [ "$(now_epoch)" -lt "$deadline" ]; do
-    id=$(probe_id "$host" "$port" "$token")
-    if [ -n "$id" ]; then
-      if [ -n "$want_id" ] && [ "$id" != "$want_id" ]; then
-        die "health check: server reports model id '$id', expected '$want_id'"
-      fi
-      note "server healthy: $id  (http://$host:$port/v1)"
+    if [ "$(probe_has_model "$host" "$port" "$token" "$want_model")" = "yes" ]; then
+      note "server healthy: $want_model  (opencode: mlx/$MLX_MODEL_ID_FIXED, http://$host:$port/v1)"
       return 0
+    fi
+    if server_answering "$host" "$port"; then
+      note "server answering but '$want_model' not yet in /v1/models - waiting"
     fi
     sleep 2
   done
   note "----- last lines of $LOG_FILE -----"
   tail -n 20 "$LOG_FILE" >&2 2>/dev/null || true
-  die "server did not become healthy within ${MLX_START_TIMEOUT}s"
+  die "server did not report '$want_model' in /v1/models within ${MLX_START_TIMEOUT}s"
 }
 
 do_start() {
@@ -330,10 +348,12 @@ do_start() {
   mkdir -p "$RUN_DIR"
   : > "$LOG_FILE"
 
-  # assemble command
-  set -- mlx_lm.server --model "$R_MODEL" --model-name "$R_MODEL_ID" \
-    --host "$R_HOST" --port "$R_PORT"
-  [ -n "$token" ] && set -- "$@" --api-key "$token"
+  # assemble command. mlx_lm.server has no --model-name or --api-key flag
+  # (verified against the mlx-lm source) - the token is still generated and
+  # handed to the container as MLX_API_KEY (forward-compatible / sent as a
+  # header the server currently just ignores), but it is never passed on the
+  # command line and enforces nothing server-side today.
+  set -- mlx_lm.server --model "$R_MODEL" --host "$R_HOST" --port "$R_PORT"
   if [ -n "$R_OPTS" ]; then
     local tok
     for tok in $R_OPTS; do set -- "$@" "$tok"; done
@@ -356,7 +376,7 @@ do_start() {
     die "server process exited immediately"
   fi
 
-  health_wait "$R_HOST" "$R_PORT" "$token" "$R_MODEL_ID"
+  health_wait "$R_HOST" "$R_PORT" "$token" "$R_MODEL"
 }
 
 # ---------------------------------------------------------------------------
@@ -372,34 +392,29 @@ check_match_or_die() {
   fi
 
   if [ "$managed_ok" -eq 1 ]; then
-    local rm_model rm_id rm_opts
-    rm_model=$(json_get '.model'); rm_id=$(json_get '.model_id'); rm_opts=$(json_get '.opts')
+    local rm_model rm_opts
+    rm_model=$(json_get '.model'); rm_opts=$(json_get '.opts')
     if [ "$rm_model" != "$R_MODEL" ]; then
       die "running server model '$rm_model' != requested '$R_MODEL' - stop it (mlx stop) or match the request"
     fi
     if [ "$rm_opts" != "$R_OPTS" ]; then
       die "running server opts '[$rm_opts]' != requested '[$R_OPTS]' - stop it (mlx stop) or match the request"
     fi
-    # sanity: live id
-    local live; live=$(probe_id "$R_HOST" "$R_PORT" "$(json_get '.token')")
-    if [ -n "$live" ] && [ "$live" != "$R_MODEL_ID" ]; then
-      die "running server reports id '$live', expected '$R_MODEL_ID'"
-    fi
-    note "reusing managed server ($rm_id) at $R_HOST:$R_PORT"
+    note "reusing managed server ($rm_model) at $R_HOST:$R_PORT"
     return 0
   fi
 
-  # server we did not start: only the reported id is checkable
-  local live; live=$(probe_id "$R_HOST" "$R_PORT" "")
-  if [ -z "$live" ]; then
-    # maybe it needs auth we do not have; accept but warn
-    note "server at $R_HOST:$R_PORT answered but /v1/models needs auth - cannot verify id"
+  # server we did not start: the only thing checkable is whether our
+  # resolved --model value shows up in its /v1/models cache scan.
+  local list; list=$(probe_list "$R_HOST" "$R_PORT" "")
+  if [ -z "$list" ]; then
+    note "server at $R_HOST:$R_PORT answered but /v1/models returned nothing - cannot verify model"
     return 0
   fi
-  if [ "$live" != "$R_MODEL_ID" ]; then
-    die "server at $R_HOST:$R_PORT serves id '$live', requested '$R_MODEL_ID' (running vs requested mismatch)"
+  if ! printf '%s\n' "$list" | grep -Fxq "$R_MODEL"; then
+    die "server at $R_HOST:$R_PORT does not report '$R_MODEL' in /v1/models (running vs requested mismatch)"
   fi
-  note "connecting to external server ($live) at $R_HOST:$R_PORT"
+  note "connecting to external server ($R_MODEL) at $R_HOST:$R_PORT"
 }
 
 # ---------------------------------------------------------------------------
@@ -472,7 +487,7 @@ do_status() {
   token=$(json_get '.token')
 
   echo "model:        $model"
-  echo "served id:    $model_id   (opencode: mlx/$model_id)"
+  echo "opencode id:  mlx/$MLX_MODEL_ID_FIXED   (fixed - mlx-lm aliases this to --model)"
   echo "host:port:    $host:$port"
   echo "managed:      $managed"
   if [ "$managed" = "true" ]; then
@@ -485,12 +500,17 @@ do_status() {
   fi
   echo "keep-alive:   ${keep:-<until mlx stop>}"
 
-  local live; live=$(probe_id "$host" "$port" "$token")
-  if [ -n "$live" ]; then
-    echo "/v1/models:   OK -> $live"
+  if [ "$(probe_has_model "$host" "$port" "$token" "$model")" = "yes" ]; then
+    echo "/v1/models:   OK -> '$model' present"
   else
-    echo "/v1/models:   unreachable"
-    echo "last log:     $(tail -n 1 "$LOG_FILE" 2>/dev/null)"
+    local list; list=$(probe_list "$host" "$port" "$token")
+    if [ -n "$list" ]; then
+      echo "/v1/models:   reachable but '$model' NOT in the list:"
+      printf '%s\n' "$list" | sed 's/^/                /'
+    else
+      echo "/v1/models:   unreachable"
+      echo "last log:     $(tail -n 1 "$LOG_FILE" 2>/dev/null)"
+    fi
   fi
 }
 

@@ -42,20 +42,28 @@ The sandbox never writes your provider/model selection — add it to
     "mlx": {
       "npm": "@ai-sdk/openai-compatible",
       "options": {
-        "baseURL": "http://127.0.0.1:8080/v1",
-        "apiKey": "{env:MLX_API_KEY}"
+        "baseURL": "http://127.0.0.1:8080/v1"
       }
     }
   },
-  "model": "mlx/<model-basename>"
+  "model": "mlx/default_model"
 }
 ```
 
-`<model-basename>` is your `--model` value with any `org/` prefix or path
-stripped (e.g. `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` →
-`Qwen2.5-Coder-7B-Instruct-4bit`). `mlx status` prints the exact string.
-`baseURL`'s port must match `--port` / `MLX_PORT`. Drop `apiKey` if you pass
-`--mlx-no-auth`.
+`mlx/default_model` is always the right id, regardless of which model you
+pass via `--model` — `mlx_lm.server` has no `--model-name` flag and its
+`/v1/models` endpoint doesn't report a single "current model" (it lists every
+mlx-lm-compatible repo in your HF cache), but it does always alias the
+literal string `default_model` to whatever `--model` it was started with, so
+this never needs to change per model. `baseURL`'s port must match `--port` /
+`MLX_PORT`.
+
+`mlx_lm.server` has no server-side auth today, so there's nothing for
+`apiKey` / `--mlx-no-auth` to protect — the token this tool generates is
+forwarded to the container as `MLX_API_KEY` only for forward-compatibility
+and isn't currently enforced by the server. Don't rely on it for security;
+the MLX server is only reachable from your own container in the first place
+(loopback + Docker's `host.docker.internal`).
 
 ## Use
 
@@ -90,7 +98,7 @@ opencode-mlx-sandbox <SUBCOMMAND> [PATH] [OPTIONS]
 | `shell` | Start `bash` in the container instead of `opencode` (args after `--` are passed to `bash`). |
 | `mlx start` | Start / ensure the host MLX server for `--model`, then exit. |
 | `mlx stop` | Stop the host MLX server — only if this tool started it (`managed`). |
-| `mlx status` | Print model, served id (`mlx/<id>`), host, port, PID, uptime, keep-alive, `managed` flag, and the live `/v1/models` probe. |
+| `mlx status` | Print model, `mlx/default_model` (the fixed opencode id), host, port, PID, uptime, keep-alive, `managed` flag, and the live `/v1/models` probe. |
 | `mlx logs` | Tail `~/.config/opencode-mlx-sandbox/run/mlx.log`. |
 | `models` | List MLX models found in the local HuggingFace cache. |
 | `stop` | Remove the container for `PATH` (session volume is kept). |

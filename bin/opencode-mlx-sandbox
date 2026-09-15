@@ -230,7 +230,11 @@ run_mlx() {
   local cmd="$1"; shift
   local args=()
   while IFS= read -r a; do args[${#args[@]}]="$a"; done < <(mlx_args)
-  "$MLX_SH" "$cmd" "${args[@]}" "$@"
+  if [ "${#args[@]}" -gt 0 ]; then
+    "$MLX_SH" "$cmd" "${args[@]}" "$@"
+  else
+    "$MLX_SH" "$cmd" "$@"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -358,6 +362,12 @@ DR+=(-e "MLX_PORT=$PORT")
 DR+=(-e "MLX_MODEL_ID=$MLX_MODEL_ID")
 DR+=(-e "MLX_MODEL=$RESOLVED_MODEL")
 DR+=(-e "OMS_YOLO=$DO_YOLO")
+# Docker doesn't forward the host's TERM into the container; without it
+# opencode's TUI can't tell what terminal capabilities it has and falls back
+# to a render with no reverse-video/highlight, so selection state is
+# invisible. Forward it (falling back to a sane default), plus color hints.
+DR+=(-e "TERM=${TERM:-xterm-256color}")
+[ -n "${COLORTERM:-}" ] && DR+=(-e "COLORTERM=$COLORTERM")
 [ -n "$MLX_API_KEY" ] && DR+=(-e "MLX_API_KEY=$MLX_API_KEY")
 [ -n "$GIT_AUTHOR_NAME_ENV" ]  && DR+=(-e "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME_ENV")
 [ -n "$GIT_AUTHOR_EMAIL_ENV" ] && DR+=(-e "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL_ENV")
@@ -378,8 +388,10 @@ if [ "$SUBCMD" = "shell" ]; then
 elif [ "$SUBCMD" = "run" ]; then
   [ "${#PASS_ARGS[@]}" -gt 0 ] || die "run: provide the prompt after --  (e.g. run -- \"fix the build\")"
   DR+=(sandbox-run run "${PASS_ARGS[@]}")
-else
+elif [ "${#PASS_ARGS[@]}" -gt 0 ]; then
   DR+=(sandbox-run "${PASS_ARGS[@]}")
+else
+  DR+=(sandbox-run)
 fi
 
 exec "${DR[@]}"

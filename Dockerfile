@@ -22,7 +22,7 @@ USER root
 # `musl-dev` cover cgo for `go build`.
 RUN apk add --no-cache \
       bash ca-certificates curl git make less jq rsync socat \
-      shadow build-base musl-dev
+      shadow build-base musl-dev ncurses-terminfo
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
